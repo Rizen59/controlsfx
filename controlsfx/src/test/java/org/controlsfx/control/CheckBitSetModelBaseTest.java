@@ -49,6 +49,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class CheckBitSetModelBaseTest {
@@ -870,6 +871,106 @@ public class CheckBitSetModelBaseTest {
 
         assertEquals("The reported changes do not add up to the checked items",
             Collections.<String>emptyList(), observedCheckedItems);
+    }
+
+    @Test
+    public void testCheckingThroughADetachedModelLeavesTheRowsOfItsFormerListAlone() {
+        // a control which replaces its list of items detaches the model it drops, and that model
+        // goes on holding the rows it had indexed: a check made through it must not reach a row
+        // the list no longer has - the model reads the item of every row it reports a check for
+        this.itemBooleanMap = new HashMap<>();
+        this.items = FXCollections.observableArrayList(ROW_1_VALUE, ROW_2_VALUE, ROW_1_VALUE);
+        model = new CheckComboBox.CheckComboBoxBitSetCheckModel<>(items, itemBooleanMap);
+        model.detach();
+        items.remove(2);
+
+        model.check(0);
+
+        assertEquals("The check reached a row beyond the end of the item list",
+            Collections.singletonList(0), new ArrayList<>(model.getCheckedIndices()));
+    }
+
+    @Test
+    public void testTheBooleanPropertyOfACheckedItemIsClearedWhenAModelIsBuiltOnAnotherList() {
+        // a control which replaces its list of items builds a new check model around the very
+        // same item boolean map, and the properties already handed out live on in that map: an
+        // item which is not in the new list holds no check any more, so the property standing
+        // for it must not go on reporting the one it had
+        BooleanProperty rowProperty = model.getItemBooleanProperty(ROW_1_VALUE);
+        model.check(0);
+
+        new CheckComboBox.CheckComboBoxBitSetCheckModel<>(
+            FXCollections.observableArrayList(ROW_6_VALUE), itemBooleanMap);
+
+        assertFalse("The property handed out for an item of the former list still reports its check",
+            rowProperty.get());
+    }
+
+    @Test
+    public void testAReportedChangeStaysReadableByTheListenersItHasYetToReach() {
+        // a listener of the checked indices is free to clear the checks from there, which leaves
+        // the change being reported standing for checks the model no longer holds: the listeners
+        // that change has yet to reach must still be able to read it, whatever the model now holds
+        model.check(2);
+        AtomicInteger reportedChanges = new AtomicInteger();
+        model.getCheckedIndices().addListener((ListChangeListener<Integer>) change -> {
+            if (reportedChanges.getAndIncrement() == 0) {
+                model.clearChecks();
+            }
+        });
+        List<String> failures = new ArrayList<>();
+        model.getCheckedIndices().addListener((ListChangeListener<Integer>) change -> {
+            try {
+                String.valueOf(change);
+            } catch (RuntimeException e) {
+                failures.add(e.toString());
+            }
+        });
+
+        model.check(4);
+
+        assertEquals("A reported change could not be read",
+            Collections.<String>emptyList(), failures);
+    }
+
+    @Test
+    public void testAnItemIsNoLongerCheckedWhenTheModelClearsItsBooleanProperty() {
+        // the property of an item stands for the check the model holds on it, and a listener of
+        // that property is free to reach back into the model: what the model answers there has to
+        // be what the property reports, not the check the item held before it left the list
+        BooleanProperty rowProperty = model.getItemBooleanProperty(ROW_1_VALUE);
+        model.check(0);
+        List<Boolean> reportedByTheModel = new ArrayList<>();
+        rowProperty.addListener(o -> reportedByTheModel.add(model.isChecked(ROW_1_VALUE)));
+
+        items.remove(ROW_1_VALUE);
+
+        assertEquals("The model reports a check for the item whose property it is clearing",
+            Collections.singletonList(false), reportedByTheModel);
+    }
+
+    @Test
+    public void testNoBooleanPropertyIsLeftBehindWhenTheItemsChangeWhileTheModelIsIndexingThem() {
+        // a listener of an item property is free to change the list of items from there, which
+        // re-indexes the model while it is walking the very items it is indexing: whatever that
+        // listener leaves in the list, no property may be left behind for an item which is gone,
+        // as getItemBooleanProperty(T) would hand it out as the property of an item of the list
+        this.itemBooleanMap = new HashMap<>();
+        this.items = FXCollections.observableArrayList(ROW_1_VALUE, ROW_2_VALUE);
+        model = new CheckComboBox.CheckComboBoxBitSetCheckModel<>(items, itemBooleanMap);
+        model.checkAll();
+        model.getItemBooleanProperty(ROW_1_VALUE).addListener(o -> items.clear());
+        model.getItemBooleanProperty(ROW_2_VALUE).addListener(o -> items.clear());
+
+        // the control replaces its list of items: the model built for the new one clears the
+        // properties of the checks it does not hold, and the listeners above empty the list
+        CheckBitSetModelBase<String> newModel =
+            new CheckComboBox.CheckComboBoxBitSetCheckModel<>(items, itemBooleanMap);
+
+        assertNull("A property is left behind for an item which is no longer in the list",
+            newModel.getItemBooleanProperty(ROW_1_VALUE));
+        assertNull("A property is left behind for an item which is no longer in the list",
+            newModel.getItemBooleanProperty(ROW_2_VALUE));
     }
 
     /**

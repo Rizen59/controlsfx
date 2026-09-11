@@ -50,6 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 
 /**
@@ -342,6 +343,42 @@ public class CheckListViewTest extends FxRobot {
         });
 
         assertCheckedIndices();
+    }
+
+    @Test
+    public void testTheBooleanPropertyOfACheckedItemIsClearedWhenTheItemListIsReplaced() {
+        // getItemBooleanProperty(T) is public API, handed out to be bound to, and it stands for
+        // the check the control holds on that item: an item which is not in the new list holds no
+        // check any more, so whoever is bound to its property must not go on rendering the one it
+        // had. The same scenario is covered against the check model alone by
+        // CheckBitSetModelBaseTest.
+        givenCheckListView(ITEM_1, ITEM_2);
+        BooleanProperty itemProperty = checkListView.getItemBooleanProperty(ITEM_1);
+
+        interact(() -> checkListView.getCheckModel().check(ITEM_1));
+        interact(() -> checkListView.setItems(FXCollections.observableArrayList(ITEM_3, ITEM_4)));
+
+        assertFalse("The property handed out for an item of the former list still reports its check",
+            itemProperty.get());
+    }
+
+    @Test
+    public void testReplacingTheItemsReportsNoCheckOnTheCheckModelTheControlDrops() {
+        // a control whose list of items is replaced builds a new check model around the very same
+        // item boolean properties: the model it drops has to let go of those properties before the
+        // new one writes them, or the two drive each other through them - and an application which
+        // is still holding the dropped model is told of checks nothing renders any more
+        givenCheckListView(ITEM_1, ITEM_2);
+        IndexedCheckModel<String> droppedModel = checkListView.getCheckModel();
+        interact(() -> droppedModel.check(ITEM_1));
+        AtomicInteger reportedChanges = new AtomicInteger();
+        droppedModel.getCheckedItems().addListener(
+            (ListChangeListener<String>) change -> reportedChanges.incrementAndGet());
+
+        interact(() -> checkListView.setItems(FXCollections.observableArrayList(ITEM_1, ITEM_3)));
+
+        assertEquals("The check model the control dropped still reports changes of its checks",
+            0, reportedChanges.get());
     }
 
     /**

@@ -253,8 +253,10 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
             setItemChecked(item, true);
         }
 
-        updateFollowedProperties();
+        // reported before the properties are written: a listener of a property this model is
+        // clearing is free to reach back into it, and has to be answered the checks it now holds
         fireChangesAfterItemsChanged();
+        updateFollowedProperties();
     }
 
     /**
@@ -295,13 +297,18 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
         }
     }
 
-    /** Sets the check state of every row holding the given item; returns whether any row changed. */
+    /**
+     * Sets the check state of every row holding the given item; returns whether any row changed.
+     * The rows are read from the index this model holds of the item list, which a model detached
+     * from that list stops following: a row which no longer holds the item is left alone.
+     */
     private boolean setItemChecked(T item, boolean checked) {
         boolean changed = false;
         List<Integer> rows = itemRows.get(item);
         if (rows != null) {
             for (int row : rows) {
-                if (checkedIndices.get(row) != checked) {
+                if (isValidIndex(row) && Objects.equals(getItem(row), item)
+                        && checkedIndices.get(row) != checked) {
                     checkedIndices.set(row, checked);
                     changed = true;
                 }
@@ -317,18 +324,33 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
     }
 
     private void updateFollowedProperties() {
-        final List<BooleanProperty> droppedProperties = new ArrayList<>();
+        final Map<T, List<Integer>> rows = itemRows;
         for (Iterator<Map.Entry<T, FollowedProperty>> it = followedProperties.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<T, FollowedProperty> followed = it.next();
-            if (!itemRows.containsKey(followed.getKey())) {
+            if (!rows.containsKey(followed.getKey())) {
                 followed.getValue().detach();
-                droppedProperties.add(followed.getValue().property);
                 it.remove();
             }
         }
-        itemBooleanMap.keySet().retainAll(itemRows.keySet());
 
-        for (T item : itemRows.keySet()) {
+        // the property of an item which is not in the list leaves the map whichever model put it
+        // there, the map being shared with the control and with the models built on it afterwards
+        final List<BooleanProperty> droppedProperties = new ArrayList<>();
+        for (Iterator<Map.Entry<T, BooleanProperty>> it = itemBooleanMap.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<T, BooleanProperty> entry = it.next();
+            if (!rows.containsKey(entry.getKey())) {
+                droppedProperties.add(entry.getValue());
+                it.remove();
+            }
+        }
+
+        for (T item : rows.keySet()) {
+            if (itemRows != rows) {
+                // a listener of a property written above changed the item list, which indexed
+                // this model on it again: the rows left to walk here are those of a list which is
+                // gone, and the properties of the one the model now holds are that pass's to write
+                break;
+            }
             BooleanProperty property = itemBooleanMap.computeIfAbsent(item,
                     key -> new SimpleBooleanProperty(key, "selected", false)); //$NON-NLS-1$
             FollowedProperty followed = followedProperties.get(item);

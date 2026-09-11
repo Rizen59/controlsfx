@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013, 2019 ControlsFX
+ * Copyright (c) 2013, 2026 ControlsFX
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -126,6 +126,13 @@ public class CheckListView<T> extends ListView<T> {
         });
         setCheckModel(new CheckListViewBitSetCheckModel<>(getItems(), itemBooleanMap));
         itemsProperty().addListener(ov -> {
+            // detached before its replacement is built: the model dropped here holds the very
+            // properties that replacement writes as it indexes the new list, and an application
+            // still holding it would be told of checks the control no longer renders
+            final IndexedCheckModel<T> droppedModel = getCheckModel();
+            if (droppedModel instanceof CheckBitSetModelBase) {
+                ((CheckBitSetModelBase<?>) droppedModel).detach();
+            }
             setCheckModel(new CheckListViewBitSetCheckModel<>(getItems(), itemBooleanMap));
         });
         
