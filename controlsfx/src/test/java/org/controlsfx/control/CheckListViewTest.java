@@ -281,6 +281,22 @@ public class CheckListViewTest extends FxRobot {
     }
 
     @Test
+    public void testTheCheckModelTheControlIsGivenBackGoesOnDrivingTheCheckBoxes() {
+        // setCheckModel(IndexedCheckModel) is public API, and an application is free to take the
+        // model of the control away and to hand it back - the control holds none in between, which
+        // its own key handler already caters for: the model it is given back is the model it has,
+        // and the checks made through it are rendered by the rows holding them
+        givenCheckListView(ITEM_1, ITEM_2, ITEM_3);
+        IndexedCheckModel<String> builtInModel = checkListView.getCheckModel();
+
+        interact(() -> checkListView.setCheckModel(null));
+        interact(() -> checkListView.setCheckModel(builtInModel));
+        interact(() -> checkListView.getCheckModel().check(ITEM_2));
+
+        assertCheckedIndices(1);
+    }
+
+    @Test
     public void testTheChecksFollowTheirItemsWhenTheItemListChangesAgainFromTheirReport() {
         // whoever is told about the reindexed checks is free to change the item list again from
         // there, and the checks - with the CheckBox rendering each of them - have to follow that

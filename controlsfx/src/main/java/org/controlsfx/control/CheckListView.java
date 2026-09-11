@@ -118,7 +118,10 @@ public class CheckListView<T> extends ListView<T> {
         
         checkModelProperty().addListener((o, oldModel, newModel) -> {
             if (oldModel instanceof CheckBitSetModelBase) {
-                ((CheckBitSetModelBase<?>) oldModel).dispose();
+                ((CheckBitSetModelBase<?>) oldModel).detach();
+            }
+            if (newModel instanceof CheckBitSetModelBase) {
+                ((CheckBitSetModelBase<?>) newModel).attach();
             }
         });
         setCheckModel(new CheckListViewBitSetCheckModel<>(getItems(), itemBooleanMap));
@@ -262,15 +265,22 @@ public class CheckListView<T> extends ListView<T> {
             super(itemBooleanMap);
             
             this.items = items == null ? FXCollections.emptyObservableList() : items;
-            this.items.addListener(itemsListener);
-            
-            updateMap();
+
+            attach();
         }
-        
+
         @Override
-        void dispose() {
+        void attach() {
+            // removed first: this model is attached again whenever it is set on its control
             items.removeListener(itemsListener);
-            super.dispose();
+            items.addListener(itemsListener);
+            super.attach();
+        }
+
+        @Override
+        void detach() {
+            items.removeListener(itemsListener);
+            super.detach();
         }
         
         

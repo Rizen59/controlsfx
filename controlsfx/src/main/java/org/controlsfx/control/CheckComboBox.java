@@ -148,7 +148,10 @@ public class CheckComboBox<T> extends ControlsFXControl {
         this.items = items == null ? FXCollections.observableArrayList() : items;
         checkModelProperty().addListener((o, oldModel, newModel) -> {
             if (oldModel instanceof CheckBitSetModelBase) {
-                ((CheckBitSetModelBase<?>) oldModel).dispose();
+                ((CheckBitSetModelBase<?>) oldModel).detach();
+            }
+            if (newModel instanceof CheckBitSetModelBase) {
+                ((CheckBitSetModelBase<?>) newModel).attach();
             }
         });
         setCheckModel(new CheckComboBoxBitSetCheckModel<>(this.items, itemBooleanMap));
@@ -385,15 +388,22 @@ public class CheckComboBox<T> extends ControlsFXControl {
             super(itemBooleanMap);
             
             this.items = items;
-            this.items.addListener(itemsListener);
-            
-            updateMap();
+
+            attach();
         }
-        
+
         @Override
-        void dispose() {
+        void attach() {
+            // removed first: this model is attached again whenever it is set on its control
             items.removeListener(itemsListener);
-            super.dispose();
+            items.addListener(itemsListener);
+            super.attach();
+        }
+
+        @Override
+        void detach() {
+            items.removeListener(itemsListener);
+            super.detach();
         }
         
         

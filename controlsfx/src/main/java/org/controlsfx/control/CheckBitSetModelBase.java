@@ -69,12 +69,17 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
 
     private final BitSet checkedIndices = new BitSet();
 
-    // the state as last reported. The lists are never mutated but replaced on each change, so
-    // that the sublists handed to the listeners stay readable; the BitSet tells the rows a change
-    // touched apart from the ones it left alone
-    private BitSet reportedIndices = new BitSet();
+    // the state the two lists expose, never mutated but replaced on each change, so that the
+    // sublists handed to the listeners stay readable
     private List<Integer> checkedIndicesSnapshot = Collections.emptyList();
     private List<T> checkedItemsSnapshot = Collections.emptyList();
+    // the rows checked as last reported, telling the rows a change touched apart from the ones
+    // it left alone
+    private BitSet reportedChecks = new BitSet();
+    // the content the listeners of each list hold, which a re-entrant change leaves further
+    // along than the change being reported
+    private List<Integer> lastReportedIndices = Collections.emptyList();
+    private List<T> lastReportedItems = Collections.emptyList();
     // the checked items, each with the number of checked rows holding it
     private Map<T, Integer> checkedRowCounts = new HashMap<>();
 
@@ -253,10 +258,18 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
     }
 
     /**
-     * Detaches this model from the item properties it drives. To be called by the control which
-     * replaces this model by another one built on the same properties.
+     * Attaches this model to the item list and to the item properties it drives, aligning them on
+     * the checks it holds. To be called by the control taking this model as its own.
      */
-    void dispose() {
+    void attach() {
+        updateMap();
+    }
+
+    /**
+     * Detaches this model from the item list and from the item properties it drives. To be called
+     * by the control dropping this model, be it for another one built on the same properties.
+     */
+    void detach() {
         for (FollowedProperty followed : followedProperties.values()) {
             followed.detach();
         }
@@ -304,10 +317,12 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
     }
 
     private void updateFollowedProperties() {
+        final List<BooleanProperty> droppedProperties = new ArrayList<>();
         for (Iterator<Map.Entry<T, FollowedProperty>> it = followedProperties.entrySet().iterator(); it.hasNext(); ) {
             Map.Entry<T, FollowedProperty> followed = it.next();
             if (!itemRows.containsKey(followed.getKey())) {
                 followed.getValue().detach();
+                droppedProperties.add(followed.getValue().property);
                 it.remove();
             }
         }
@@ -325,6 +340,12 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
                 property.set(isChecked(item));
             }
         }
+
+        // an item which left the list holds no check any more. Cleared once the map is up to
+        // date, as a listener of such a property is free to reach back into this model
+        for (BooleanProperty dropped : droppedProperties) {
+            dropped.set(false);
+        }
     }
 
     /**
@@ -334,7 +355,7 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
      */
     private void fireChanges() {
         final BitSet changedRows = (BitSet) checkedIndices.clone();
-        changedRows.xor(reportedIndices);
+        changedRows.xor(reportedChecks);
         if (changedRows.isEmpty()) {
             return;
         }
@@ -348,16 +369,12 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
         final Map<T, Integer> rowCountDeltas = new HashMap<>();
 
         int position = 0;
-        int from = -1;
         for (int row = changedRows.nextSetBit(0); row >= 0; row = changedRows.nextSetBit(row + 1)) {
             // the rows left alone below this one are carried over as they were
             final int rowPosition = positionOf(previousIndices, position, row);
             indices.addAll(previousIndices.subList(position, rowPosition));
             items.addAll(previousItems.subList(position, rowPosition));
             position = rowPosition;
-            if (from < 0) {
-                from = indices.size();
-            }
             if (checkedIndices.get(row)) {
                 final T item = getItem(row);
                 indices.add(row);
@@ -369,7 +386,6 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
                 position++;
             }
         }
-        final int tail = previousIndices.size() - position;
         indices.addAll(previousIndices.subList(position, previousIndices.size()));
         items.addAll(previousItems.subList(position, previousItems.size()));
 
@@ -388,7 +404,7 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
             }
         }
 
-        publish(indices, items, from, tail, from, tail, affectedItems);
+        publish(indices, items, affectedItems);
     }
 
     /**
@@ -397,8 +413,6 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
      * other items sitting at them, so nothing of the state as last reported is carried over.
      */
     private void fireChangesAfterItemsChanged() {
-        final List<Integer> previousIndices = checkedIndicesSnapshot;
-        final List<T> previousItems = checkedItemsSnapshot;
         final Map<T, Integer> previousRowCounts = checkedRowCounts;
 
         final List<Integer> indices = new ArrayList<>(checkedIndices.cardinality());
@@ -424,36 +438,28 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
             }
         }
 
-        final int indicesFrom = commonPrefix(previousIndices, indices);
-        final int itemsFrom = commonPrefix(previousItems, items);
-        publish(indices, items,
-                indicesFrom, commonSuffix(previousIndices, indices, indicesFrom),
-                itemsFrom, commonSuffix(previousItems, items, itemsFrom),
-                affectedItems);
+        publish(indices, items, affectedItems);
     }
 
     /**
-     * Takes the given state as the one last reported, reports what it changes of the previous
-     * one to the listeners of both lists, then aligns the properties of the items whose check
-     * state changed. Each list is reported the single replacement turning its previous content
-     * into the current one, past the positions left alone at its head ({@code from}) and at its
-     * tail ({@code tail}).
+     * Takes the given state as the current one, reports to the listeners of both lists what it
+     * changes of the content they hold, then aligns the properties of the affected items. Both
+     * lists are moved on before either is reported, so that a listener reads them in step.
      */
-    private void publish(List<Integer> indices, List<T> items,
-                         int indicesFrom, int indicesTail, int itemsFrom, int itemsTail,
-                         Set<T> affectedItems) {
-        final List<Integer> previousIndices = checkedIndicesSnapshot;
-        final List<T> previousItems = checkedItemsSnapshot;
-        final List<Integer> currentIndices = Collections.unmodifiableList(indices);
-        final List<T> currentItems = Collections.unmodifiableList(items);
-        reportedIndices = (BitSet) checkedIndices.clone();
-        checkedIndicesSnapshot = currentIndices;
-        checkedItemsSnapshot = currentItems;
+    private void publish(List<Integer> indices, List<T> items, Set<T> affectedItems) {
+        reportedChecks = (BitSet) checkedIndices.clone();
+        checkedIndicesSnapshot = Collections.unmodifiableList(indices);
+        checkedItemsSnapshot = Collections.unmodifiableList(items);
 
-        // reported from the lists built here rather than from the fields: a listener told about
-        // the first change may change the model again, which moves the fields on
-        report(checkedIndicesList, previousIndices, currentIndices, indicesFrom, indicesTail);
-        report(checkedItemsList, previousItems, currentItems, itemsFrom, itemsTail);
+        final List<Integer> previousIndices = lastReportedIndices;
+        lastReportedIndices = checkedIndicesSnapshot;
+        report(checkedIndicesList, previousIndices, lastReportedIndices);
+
+        // read after the indices are reported: a listener told about them may have changed the
+        // model, which reported the items list ahead of this one
+        final List<T> previousItems = lastReportedItems;
+        lastReportedItems = checkedItemsSnapshot;
+        report(checkedItemsList, previousItems, lastReportedItems);
 
         // written last and to the current state: a listener above may have changed the model again
         for (T item : affectedItems) {
@@ -464,8 +470,13 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
         }
     }
 
-    /** Reports the replacement of the elements of {@code previous} by the ones of {@code current} between the given common head and tail. */
-    private static <E> void report(ReadOnlyUnbackedObservableList<E> list, List<E> previous, List<E> current, int from, int tail) {
+    /** Reports the single replacement turning {@code previous} into {@code current}, past the positions they have in common at their head and at their tail. */
+    private static <E> void report(ReadOnlyUnbackedObservableList<E> list, List<E> previous, List<E> current) {
+        if (previous == current) {
+            return;
+        }
+        final int from = commonPrefix(previous, current);
+        final int tail = commonSuffix(previous, current, from);
         final List<E> removed = previous.subList(from, previous.size() - tail);
         final List<E> added = current.subList(from, current.size() - tail);
         if (!removed.isEmpty() || !added.isEmpty()) {

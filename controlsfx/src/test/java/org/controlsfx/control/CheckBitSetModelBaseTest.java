@@ -545,6 +545,20 @@ public class CheckBitSetModelBaseTest {
     }
 
     @Test
+    public void testTheBooleanPropertyOfACheckedItemIsClearedWhenThatItemLeavesTheList() {
+        // the property of an item is public API, handed out to be bound to, and it stands for the
+        // check the model holds on that item: an item taken out of the list holds no check any
+        // more, so whoever is bound to its property must not go on rendering the one it had
+        BooleanProperty rowProperty = model.getItemBooleanProperty(ROW_5_VALUE);
+        model.check(4);
+
+        items.remove(ROW_5_VALUE);
+
+        assertFalse("The property handed out for a removed item still reports its former check",
+            rowProperty.get());
+    }
+
+    @Test
     public void testClearChecksOnAnUncheckedModelReportsNoChange() {
         List<String> changes = recordChangesOfCheckedIndices();
 
@@ -835,6 +849,27 @@ public class CheckBitSetModelBaseTest {
         model.check(4);
 
         assertOnlyCheckedIndicesAre();
+    }
+
+    @Test
+    public void testClearingEveryCheckFromTheReportOfACheckReportsCoherentChangesOfTheCheckedItems() {
+        // the checks are reported as two lists, one after the other, and a listener of either of
+        // them is free to change the model from there: whoever rebuilds the checked items from the
+        // changes handed to him has to end up with the items the model holds, whichever of the two
+        // lists the change which reached the model came from
+        model.check(2);
+        List<String> observedCheckedItems = observe(model.getCheckedItems());
+        AtomicInteger reportedChanges = new AtomicInteger();
+        model.getCheckedIndices().addListener((ListChangeListener<Integer>) change -> {
+            if (reportedChanges.getAndIncrement() == 0) {
+                model.clearChecks();
+            }
+        });
+
+        model.check(4);
+
+        assertEquals("The reported changes do not add up to the checked items",
+            Collections.<String>emptyList(), observedCheckedItems);
     }
 
     /**
