@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2013, 2024, ControlsFX
+ * Copyright (c) 2013, 2026, ControlsFX
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -26,26 +26,37 @@
  */
 package org.controlsfx.control;
 
-import impl.org.controlsfx.collections.MappingChange;
 import impl.org.controlsfx.collections.NonIterableChange;
 import impl.org.controlsfx.collections.ReadOnlyUnbackedObservableList;
 
+import javafx.beans.InvalidationListener;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
-import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
 
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
+import java.util.Objects;
+import java.util.Set;
 
+/**
+ * Check model backed by a {@link BitSet} of the checked indices.
+ *
+ * <p>The check state belongs to the items: the rows holding equal items share a single
+ * {@link BooleanProperty}, so checking or clearing any of those rows reaches them all, and a
+ * change of the item list re-indexes the checks so that they stay on the items holding them.
+ * The observable lists of checked indices and items expose the state as last reported, so that
+ * a change handed to a listener stays readable whatever that listener does to the model.
+ */
 // not public API
-abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> { 
-    
+abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
+
     /***********************************************************************
      *                                                                     *
      * Internal properties                                                 *
@@ -53,13 +64,23 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
      **********************************************************************/
 
     private final Map<T, BooleanProperty> itemBooleanMap;
+    private final Map<T, FollowedProperty> followedProperties = new HashMap<>();
+    private Map<T, List<Integer>> itemRows = Collections.emptyMap();
 
-    private final BitSet checkedIndices;
-    private final BitSetReadOnlyUnbackedObservableList checkedIndicesList;
-    private final ReadOnlyUnbackedObservableList<T> checkedItemsList;
+    private final BitSet checkedIndices = new BitSet();
 
-    private AtomicBoolean listenerFlag = new AtomicBoolean();
-    
+    // the state as last reported. The lists are never mutated but replaced on each change, so
+    // that the sublists handed to the listeners stay readable; the BitSet tells the rows a change
+    // touched apart from the ones it left alone
+    private BitSet reportedIndices = new BitSet();
+    private List<Integer> checkedIndicesSnapshot = Collections.emptyList();
+    private List<T> checkedItemsSnapshot = Collections.emptyList();
+    // the checked items, each with the number of checked rows holding it
+    private Map<T, Integer> checkedRowCounts = new HashMap<>();
+
+    private final ReadOnlyUnbackedObservableList<Integer> checkedIndicesList = new CheckedIndicesList();
+    private final ReadOnlyUnbackedObservableList<T> checkedItemsList = new CheckedItemsList();
+
 
     /***********************************************************************
      *                                                                     *
@@ -69,65 +90,6 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
 
     CheckBitSetModelBase(final Map<T, BooleanProperty> itemBooleanMap) {
         this.itemBooleanMap = itemBooleanMap;
-
-        this.checkedIndices = new BitSet();
-        this.checkedIndicesList = new BitSetReadOnlyUnbackedObservableList(checkedIndices);
-        this.checkedItemsList = new ReadOnlyUnbackedObservableList<T>() {
-            @Override public T get(int i) {
-                int pos = checkedIndicesList.get(i);
-                if (pos < 0 || pos >= getItemCount()) return null;
-                return getItem(pos);
-            }
-
-            @Override public int size() {
-                return checkedIndices.cardinality();
-            }
-        };
-        
-        final MappingChange.Map<Integer,T> map = f -> getItem(f);
-        
-        checkedIndicesList.addListener((ListChangeListener<Integer>) c -> {
-            // when the selectedIndices ObservableList changes, we manually call
-            // the observers of the selectedItems ObservableList.
-            boolean hasRealChangeOccurred = false;
-            while (c.next() && ! hasRealChangeOccurred) {
-                hasRealChangeOccurred = c.wasAdded() || c.wasRemoved();
-            }
-
-            if (hasRealChangeOccurred) {
-                c.reset();
-                checkedItemsList.callObservers(new MappingChange<>(c, map, checkedItemsList));
-            }
-            c.reset();
-        });
-        
-        // this code is to handle the situation where a developer is manually
-        // toggling the check model, and expecting the UI to update (without
-        // this it won't happen!).
-        getCheckedItems().addListener((ListChangeListener<T>) c -> {
-            while (c.next()) {
-                if (c.wasAdded()) {
-                    for (T item : c.getAddedSubList()) {
-                        updateBooleanProperty(item, true);
-                    }
-                } 
-                
-                if (c.wasRemoved()) {
-                    for (T item : c.getRemoved()) {
-                        updateBooleanProperty(item, false);
-                    }
-                }
-            }
-        });
-    }
-
-    private void updateBooleanProperty(T item, boolean value) {
-        BooleanProperty p = getItemBooleanProperty(item);
-        if (p != null) {
-            listenerFlag.set(true);
-            p.set(value);
-            listenerFlag.set(false);
-        }
     }
 
 
@@ -139,24 +101,24 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
 
     @Override
     public abstract T getItem(int index);
-    
+
     @Override
     public abstract int getItemCount();
-    
+
     @Override
     public abstract int getItemIndex(T item);
-    
+
     BooleanProperty getItemBooleanProperty(T item) {
         return itemBooleanMap.get(item);
     }
-    
-    
+
+
     /***********************************************************************
      *                                                                     *
      * Public selection API                                                *
      *                                                                     *
      **********************************************************************/
-    
+
     /**
      * Returns a read-only list of the currently checked indices in the CheckBox.
      */
@@ -164,7 +126,7 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
     public ObservableList<Integer> getCheckedIndices() {
         return checkedIndicesList;
     }
-    
+
     /**
      * Returns a read-only list of the currently checked items in the CheckBox.
      */
@@ -176,68 +138,70 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
     /** {@inheritDoc} */
     @Override
     public void checkAll() {
-        for (int i = 0; i < getItemCount(); i++) {
-            check(i);
-        }
+        checkedIndices.set(0, getItemCount());
+        fireChanges();
     }
 
     /** {@inheritDoc} */
     @Override
     public void checkIndices(int... indices) {
         for (int index : indices) {
-            checkedIndices.set(index);
+            setRowsOf(index, true);
         }
-        ListChangeListener.Change<Integer> change = createRangeChange(checkedIndicesList, Arrays.stream(indices).boxed().collect(Collectors.toList()), false);
-        checkedIndicesList.callObservers(change);
-    }
-    
-    /** {@inheritDoc} */
-    @Override public void clearCheck(T item) {
-        int index = getItemIndex(item);
-        clearCheck(index);        
+        fireChanges();
     }
 
     /** {@inheritDoc} */
     @Override
-    public void clearChecks() {
-        List<Integer> removed = new BitSetReadOnlyUnbackedObservableList((BitSet) checkedIndices.clone());
-        checkedIndices.clear();
-        checkedIndicesList.callObservers(
-                new NonIterableChange.GenericAddRemoveChange<>(0, 0, removed, checkedIndicesList));
+    public void check(int index) {
+        setRowsOf(index, true);
+        fireChanges();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void check(T item) {
+        setItemChecked(item, true);
+        fireChanges();
     }
 
     /** {@inheritDoc} */
     @Override
     public void clearCheck(int index) {
-        if (index < 0 || index >= getItemCount()) return;
-        final int changeIndex = checkedIndicesList.indexOf(index);
-        checkedIndices.clear(index);
-        checkedIndicesList.callObservers(new NonIterableChange.SimpleRemovedChange<>(changeIndex, changeIndex, index, checkedIndicesList));
+        setRowsOf(index, false);
+        fireChanges();
     }
-    
+
+    /** {@inheritDoc} */
+    @Override
+    public void clearCheck(T item) {
+        setItemChecked(item, false);
+        fireChanges();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public void clearChecks() {
+        checkedIndices.clear();
+        fireChanges();
+    }
+
     /** {@inheritDoc} */
     @Override
     public boolean isEmpty() {
         return checkedIndices.isEmpty();
     }
-    
-    /** {@inheritDoc} */
-    @Override public boolean isChecked(T item) {
-        int index = getItemIndex(item);
-        return isChecked(index);
-    }
 
     /** {@inheritDoc} */
     @Override
     public boolean isChecked(int index) {
-        return checkedIndices.get(index);
+        return isValidIndex(index) && checkedIndices.get(index);
     }
 
     /** {@inheritDoc} */
     @Override
-    public void toggleCheckState(T item) {
-        int index = getItemIndex(item);
-        toggleCheckState(index);
+    public boolean isChecked(T item) {
+        return checkedRowCounts.containsKey(item);
     }
 
     /** {@inheritDoc} */
@@ -252,50 +216,53 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
 
     /** {@inheritDoc} */
     @Override
-    public void check(int index) {
-        if (index < 0 || index >= getItemCount()) return;
-        checkedIndices.set(index);
-        final int changeIndex = checkedIndicesList.indexOf(index);
-        checkedIndicesList.callObservers(new NonIterableChange.SimpleAddChange<>(changeIndex, changeIndex+1, checkedIndicesList));
+    public void toggleCheckState(T item) {
+        if (isChecked(item)) {
+            clearCheck(item);
+        } else {
+            check(item);
+        }
     }
 
-    /** {@inheritDoc} */
-    @Override
-    public void check(T item) {
-        int index = getItemIndex(item);
-        check(index);
-    }
-    
+
     /***********************************************************************
      *                                                                     *
-     * Private implementation                                              *
+     * Item list support                                                   *
      *                                                                     *
      **********************************************************************/
-    
+
+    /**
+     * Follows the current item list: indexes the rows of every item, keeps a
+     * {@link BooleanProperty} for each item of the list and re-indexes the checks so that they
+     * stay on the items holding them.
+     */
     protected void updateMap() {
-        // reset the map
-        itemBooleanMap.clear();
-        for (int i = 0; i < getItemCount(); i++) {
-            final int index = i;
-            final T item = getItem(index);
-
-            final BooleanProperty booleanProperty = new SimpleBooleanProperty(item, "selected", false); //$NON-NLS-1$
-            itemBooleanMap.put(item, booleanProperty);
-
-            // this is where we listen to changes to the boolean properties,
-            // updating the selected indices list (and therefore indirectly
-            // the selected items list) when the checkbox is toggled
-            booleanProperty.addListener(o -> {
-                if (!listenerFlag.get()) {
-                    if (booleanProperty.get()) {
-                        check(index);
-                    } else {
-                        clearCheck(index);
-                    }
-                }
-            });
+        Map<T, List<Integer>> rows = new HashMap<>();
+        for (int i = 0, count = getItemCount(); i < count; i++) {
+            rows.computeIfAbsent(getItem(i), item -> new ArrayList<>(1)).add(i);
         }
+        itemRows = rows;
+
+        checkedIndices.clear();
+        for (T item : checkedRowCounts.keySet()) {
+            setItemChecked(item, true);
+        }
+
+        updateFollowedProperties();
+        fireChangesAfterItemsChanged();
     }
+
+    /**
+     * Detaches this model from the item properties it drives. To be called by the control which
+     * replaces this model by another one built on the same properties.
+     */
+    void dispose() {
+        for (FollowedProperty followed : followedProperties.values()) {
+            followed.detach();
+        }
+        followedProperties.clear();
+    }
+
 
     /***********************************************************************
      *                                                                     *
@@ -303,182 +270,334 @@ abstract class CheckBitSetModelBase<T> implements IndexedCheckModel<T> {
      *                                                                     *
      **********************************************************************/
 
-    private class BitSetReadOnlyUnbackedObservableList extends ReadOnlyUnbackedObservableList<Integer> {
-        private final BitSet bitset;
+    private boolean isValidIndex(int index) {
+        return index >= 0 && index < getItemCount();
+    }
 
-        private int lastGetIndex = -1;
-        private int lastGetValue = -1;
-
-        public BitSetReadOnlyUnbackedObservableList(BitSet bitset) {
-            this.bitset = bitset;
-        }
-
-        @Override public Integer get(int index) {
-            final int itemCount = getItemCount();
-            if (index < 0 || index >= itemCount)  {
-                return -1;
-            }
-
-            if (index == (lastGetIndex + 1)) {
-                // we're iterating forward in order, short circuit for
-                // performance reasons (RT-39776)
-                lastGetIndex++;
-                lastGetValue = bitset.nextSetBit(lastGetValue + 1);
-                return lastGetValue;
-            } else if (index == (lastGetIndex - 1) && index > 0) {
-                // we're iterating backward in order, short circuit for
-                // performance reasons (RT-39776)
-                lastGetIndex--;
-                lastGetValue = bitset.previousSetBit(lastGetValue - 1);
-                return lastGetValue;
-            } else {
-                for (lastGetIndex = 0, lastGetValue = bitset.nextSetBit(0);
-                     lastGetValue >= 0 || lastGetIndex == index;
-                     lastGetIndex++, lastGetValue = bitset.nextSetBit(lastGetValue + 1)) {
-                    if (lastGetIndex == index) {
-                        return lastGetValue;
-                    }
-                }
-            }
-
-            return -1;
-        }
-
-        @Override public int indexOf(Object obj) {
-            if (!(obj instanceof Number)) {
-                return -1;
-            }
-            Number n = (Number) obj;
-            int index = n.intValue();
-            if (!bitset.get(index)) {
-                return -1;
-            }
-
-            // is left most bit
-            if (index == 0) {
-                return 0;
-            }
-
-            // is right most bit
-            if (index == bitset.length() - 1) {
-                return size() - 1;
-            }
-
-            // count right bit
-            if (index > bitset.length() / 2) {
-                int count = 1;
-                for (int i = bitset.nextSetBit(index+1); i >= 0; i = bitset.nextSetBit(i+1)) {
-                    count++;
-                }
-                return size() - count;
-            }
-
-            // count left bit
-            int count = 0;
-            for (int i = bitset.previousSetBit(index-1);  i >= 0; i = bitset.previousSetBit(i-1)) {
-                count++;
-            }
-            return count;
-        }
-
-        @Override public int size() {
-            return bitset.cardinality();
-        }
-
-        @Override public boolean contains(Object o) {
-            if (o instanceof Number) {
-                Number n = (Number) o;
-                int index = n.intValue();
-
-                return index >= 0 && index < bitset.length() &&
-                        bitset.get(index);
-            }
-
-            return false;
-        }
-
-        public void reset() {
-            this.lastGetIndex = -1;
-            this.lastGetValue = -1;
+    /** Sets the check state of the given row along with every other row holding the same item. */
+    private void setRowsOf(int index, boolean checked) {
+        if (isValidIndex(index)) {
+            checkedIndices.set(index, checked);
+            setItemChecked(getItem(index), checked);
         }
     }
 
-    private static ListChangeListener.Change<Integer> createRangeChange(final ObservableList<Integer> list, final List<Integer> addedItems, boolean splitChanges) {
-        ListChangeListener.Change<Integer> change = new ListChangeListener.Change<Integer>(list) {
-            private final int[] EMPTY_PERM = new int[0];
-            private final int addedSize = addedItems.size();
-
-            private boolean invalid = true;
-
-            private int pos = 0;
-            private int from = pos;
-            private int to = pos;
-
-            @Override public int getFrom() {
-                checkState();
-                return from;
-            }
-
-            @Override public int getTo() {
-                checkState();
-                return to;
-            }
-
-            @Override public List<Integer> getRemoved() {
-                checkState();
-                return Collections.<Integer>emptyList();
-            }
-
-            @Override protected int[] getPermutation() {
-                checkState();
-                return EMPTY_PERM;
-            }
-
-            @Override public int getAddedSize() {
-                return to - from;
-            }
-
-            @Override public boolean next() {
-                if (pos >= addedSize) return false;
-
-                // starting from pos, we keep going until the value is
-                // not the next value
-                int startValue = addedItems.get(pos++);
-                from = list.indexOf(startValue);
-                to = from + 1;
-                int endValue = startValue;
-                while (pos < addedSize) {
-                    int previousEndValue = endValue;
-                    endValue = addedItems.get(pos++);
-                    ++to;
-                    if (splitChanges && previousEndValue != (endValue - 1)) {
-                        break;
-                    }
-                }
-
-                if (invalid) {
-                    invalid = false;
-                    return true;
-                }
-
-                // we keep going until we've represented all changes!
-                return splitChanges && pos < addedSize;
-            }
-
-            @Override public void reset() {
-                invalid = true;
-                pos = 0;
-                to = 0;
-                from = 0;
-            }
-
-            private void checkState() {
-                if (invalid) {
-                    throw new IllegalStateException("Invalid Change state: next() must be called before inspecting the Change.");
+    /** Sets the check state of every row holding the given item; returns whether any row changed. */
+    private boolean setItemChecked(T item, boolean checked) {
+        boolean changed = false;
+        List<Integer> rows = itemRows.get(item);
+        if (rows != null) {
+            for (int row : rows) {
+                if (checkedIndices.get(row) != checked) {
+                    checkedIndices.set(row, checked);
+                    changed = true;
                 }
             }
+        }
+        return changed;
+    }
 
-        };
-        return change;
+    private void onItemPropertyInvalidated(T item, BooleanProperty property) {
+        if (setItemChecked(item, property.get())) {
+            fireChanges();
+        }
+    }
+
+    private void updateFollowedProperties() {
+        for (Iterator<Map.Entry<T, FollowedProperty>> it = followedProperties.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<T, FollowedProperty> followed = it.next();
+            if (!itemRows.containsKey(followed.getKey())) {
+                followed.getValue().detach();
+                it.remove();
+            }
+        }
+        itemBooleanMap.keySet().retainAll(itemRows.keySet());
+
+        for (T item : itemRows.keySet()) {
+            BooleanProperty property = itemBooleanMap.computeIfAbsent(item,
+                    key -> new SimpleBooleanProperty(key, "selected", false)); //$NON-NLS-1$
+            FollowedProperty followed = followedProperties.get(item);
+            if (followed == null || followed.property != property) {
+                if (followed != null) {
+                    followed.detach();
+                }
+                followedProperties.put(item, new FollowedProperty(item, property));
+                property.set(isChecked(item));
+            }
+        }
+    }
+
+    /**
+     * Reports the rows checked or cleared since the state was last reported, the item list being
+     * the same as then. The rows a change left alone keep the position and the item they had,
+     * so the state as last reported is carried over and only the touched rows are looked at.
+     */
+    private void fireChanges() {
+        final BitSet changedRows = (BitSet) checkedIndices.clone();
+        changedRows.xor(reportedIndices);
+        if (changedRows.isEmpty()) {
+            return;
+        }
+
+        final List<Integer> previousIndices = checkedIndicesSnapshot;
+        final List<T> previousItems = checkedItemsSnapshot;
+        final int size = checkedIndices.cardinality();
+        final List<Integer> indices = new ArrayList<>(size);
+        final List<T> items = new ArrayList<>(size);
+        // for each item, the change of the number of checked rows holding it
+        final Map<T, Integer> rowCountDeltas = new HashMap<>();
+
+        int position = 0;
+        int from = -1;
+        for (int row = changedRows.nextSetBit(0); row >= 0; row = changedRows.nextSetBit(row + 1)) {
+            // the rows left alone below this one are carried over as they were
+            final int rowPosition = positionOf(previousIndices, position, row);
+            indices.addAll(previousIndices.subList(position, rowPosition));
+            items.addAll(previousItems.subList(position, rowPosition));
+            position = rowPosition;
+            if (from < 0) {
+                from = indices.size();
+            }
+            if (checkedIndices.get(row)) {
+                final T item = getItem(row);
+                indices.add(row);
+                items.add(item);
+                rowCountDeltas.merge(item, 1, Integer::sum);
+            } else {
+                // the row was checked as last reported, so it is the one at this position
+                rowCountDeltas.merge(previousItems.get(position), -1, Integer::sum);
+                position++;
+            }
+        }
+        final int tail = previousIndices.size() - position;
+        indices.addAll(previousIndices.subList(position, previousIndices.size()));
+        items.addAll(previousItems.subList(position, previousItems.size()));
+
+        final Set<T> affectedItems = new HashSet<>();
+        for (Map.Entry<T, Integer> delta : rowCountDeltas.entrySet()) {
+            final T item = delta.getKey();
+            final int before = checkedRowCounts.getOrDefault(item, 0);
+            final int after = before + delta.getValue();
+            if (after == 0) {
+                checkedRowCounts.remove(item);
+            } else {
+                checkedRowCounts.put(item, after);
+            }
+            if ((before == 0) != (after == 0)) {
+                affectedItems.add(item);
+            }
+        }
+
+        publish(indices, items, from, tail, from, tail, affectedItems);
+    }
+
+    /**
+     * Reports the difference between the state as last reported and the current one after a
+     * change of the item list. Such a change is free to leave the very same rows checked with
+     * other items sitting at them, so nothing of the state as last reported is carried over.
+     */
+    private void fireChangesAfterItemsChanged() {
+        final List<Integer> previousIndices = checkedIndicesSnapshot;
+        final List<T> previousItems = checkedItemsSnapshot;
+        final Map<T, Integer> previousRowCounts = checkedRowCounts;
+
+        final List<Integer> indices = new ArrayList<>(checkedIndices.cardinality());
+        final List<T> items = new ArrayList<>(indices.size());
+        final Map<T, Integer> rowCounts = new HashMap<>();
+        for (int i = checkedIndices.nextSetBit(0); i >= 0; i = checkedIndices.nextSetBit(i + 1)) {
+            final T item = getItem(i);
+            indices.add(i);
+            items.add(item);
+            rowCounts.merge(item, 1, Integer::sum);
+        }
+        checkedRowCounts = rowCounts;
+
+        final Set<T> affectedItems = new HashSet<>();
+        for (T item : previousRowCounts.keySet()) {
+            if (!rowCounts.containsKey(item)) {
+                affectedItems.add(item);
+            }
+        }
+        for (T item : rowCounts.keySet()) {
+            if (!previousRowCounts.containsKey(item)) {
+                affectedItems.add(item);
+            }
+        }
+
+        final int indicesFrom = commonPrefix(previousIndices, indices);
+        final int itemsFrom = commonPrefix(previousItems, items);
+        publish(indices, items,
+                indicesFrom, commonSuffix(previousIndices, indices, indicesFrom),
+                itemsFrom, commonSuffix(previousItems, items, itemsFrom),
+                affectedItems);
+    }
+
+    /**
+     * Takes the given state as the one last reported, reports what it changes of the previous
+     * one to the listeners of both lists, then aligns the properties of the items whose check
+     * state changed. Each list is reported the single replacement turning its previous content
+     * into the current one, past the positions left alone at its head ({@code from}) and at its
+     * tail ({@code tail}).
+     */
+    private void publish(List<Integer> indices, List<T> items,
+                         int indicesFrom, int indicesTail, int itemsFrom, int itemsTail,
+                         Set<T> affectedItems) {
+        final List<Integer> previousIndices = checkedIndicesSnapshot;
+        final List<T> previousItems = checkedItemsSnapshot;
+        final List<Integer> currentIndices = Collections.unmodifiableList(indices);
+        final List<T> currentItems = Collections.unmodifiableList(items);
+        reportedIndices = (BitSet) checkedIndices.clone();
+        checkedIndicesSnapshot = currentIndices;
+        checkedItemsSnapshot = currentItems;
+
+        // reported from the lists built here rather than from the fields: a listener told about
+        // the first change may change the model again, which moves the fields on
+        report(checkedIndicesList, previousIndices, currentIndices, indicesFrom, indicesTail);
+        report(checkedItemsList, previousItems, currentItems, itemsFrom, itemsTail);
+
+        // written last and to the current state: a listener above may have changed the model again
+        for (T item : affectedItems) {
+            FollowedProperty followed = followedProperties.get(item);
+            if (followed != null) {
+                followed.property.set(isChecked(item));
+            }
+        }
+    }
+
+    /** Reports the replacement of the elements of {@code previous} by the ones of {@code current} between the given common head and tail. */
+    private static <E> void report(ReadOnlyUnbackedObservableList<E> list, List<E> previous, List<E> current, int from, int tail) {
+        final List<E> removed = previous.subList(from, previous.size() - tail);
+        final List<E> added = current.subList(from, current.size() - tail);
+        if (!removed.isEmpty() || !added.isEmpty()) {
+            list.callObservers(new SnapshotChange<>(from, removed, added, list));
+        }
+    }
+
+    /**
+     * The position the given index holds, or would hold, in the given ascending list of indices,
+     * looking from the given position on.
+     */
+    private static int positionOf(List<Integer> indices, int from, int index) {
+        final int found = Collections.binarySearch(indices.subList(from, indices.size()), index);
+        return from + (found >= 0 ? found : -found - 1);
+    }
+
+    /** The number of leading elements the two lists have in common. */
+    private static <E> int commonPrefix(List<E> previous, List<E> current) {
+        final int common = Math.min(previous.size(), current.size());
+        int from = 0;
+        while (from < common && Objects.equals(previous.get(from), current.get(from))) {
+            from++;
+        }
+        return from;
+    }
+
+    /** The number of trailing elements the two lists have in common past their common prefix. */
+    private static <E> int commonSuffix(List<E> previous, List<E> current, int from) {
+        final int common = Math.min(previous.size(), current.size());
+        int tail = 0;
+        while (tail < common - from
+                && Objects.equals(previous.get(previous.size() - 1 - tail), current.get(current.size() - 1 - tail))) {
+            tail++;
+        }
+        return tail;
+    }
+
+
+    /***********************************************************************
+     *                                                                     *
+     * Support classes                                                     *
+     *                                                                     *
+     **********************************************************************/
+
+    /** The property of an item along with the listener through which this model follows it. */
+    private final class FollowedProperty {
+        private final BooleanProperty property;
+        private final InvalidationListener listener;
+
+        FollowedProperty(T item, BooleanProperty property) {
+            this.property = property;
+            this.listener = o -> onItemPropertyInvalidated(item, property);
+            property.addListener(listener);
+        }
+
+        void detach() {
+            property.removeListener(listener);
+        }
+    }
+
+    private final class CheckedIndicesList extends ReadOnlyUnbackedObservableList<Integer> {
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the checked index at the given position, or {@code -1} for a position which
+         *         holds none
+         */
+        @Override
+        public Integer get(int index) {
+            if (index < 0 || index >= checkedIndicesSnapshot.size()) {
+                return -1;
+            }
+            return checkedIndicesSnapshot.get(index);
+        }
+
+        @Override
+        public int size() {
+            return checkedIndicesSnapshot.size();
+        }
+
+        @Override
+        public int indexOf(Object o) {
+            if (!(o instanceof Number)) {
+                return -1;
+            }
+            final int position = Collections.binarySearch(checkedIndicesSnapshot, ((Number) o).intValue());
+            return position < 0 ? -1 : position;
+        }
+    }
+
+    private final class CheckedItemsList extends ReadOnlyUnbackedObservableList<T> {
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the checked item at the given position, or {@code null} for a position which
+         *         holds none
+         */
+        @Override
+        public T get(int index) {
+            if (index < 0 || index >= checkedItemsSnapshot.size()) {
+                return null;
+            }
+            return checkedItemsSnapshot.get(index);
+        }
+
+        @Override
+        public int size() {
+            return checkedItemsSnapshot.size();
+        }
+    }
+
+    /** A single replacement built from snapshots, readable whatever happens to the list afterwards. */
+    private static final class SnapshotChange<E> extends NonIterableChange.GenericAddRemoveChange<E> {
+        private final List<E> added;
+
+        SnapshotChange(int from, List<E> removed, List<E> added, ObservableList<E> list) {
+            super(from, from + added.size(), removed, list);
+            this.added = added;
+        }
+
+        @Override
+        public List<E> getAddedSubList() {
+            checkState();
+            return added;
+        }
+
+        @Override
+        public int getAddedSize() {
+            checkState();
+            return added.size();
+        }
     }
 }

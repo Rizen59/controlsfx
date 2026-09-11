@@ -116,6 +116,11 @@ public class CheckListView<T> extends ListView<T> {
         super(items);
         this.itemBooleanMap = new HashMap<>();
         
+        checkModelProperty().addListener((o, oldModel, newModel) -> {
+            if (oldModel instanceof CheckBitSetModelBase) {
+                ((CheckBitSetModelBase<?>) oldModel).dispose();
+            }
+        });
         setCheckModel(new CheckListViewBitSetCheckModel<>(getItems(), itemBooleanMap));
         itemsProperty().addListener(ov -> {
             setCheckModel(new CheckListViewBitSetCheckModel<>(getItems(), itemBooleanMap));
@@ -243,6 +248,7 @@ public class CheckListView<T> extends ListView<T> {
          **********************************************************************/
         
         private final ObservableList<T> items;
+        private final ListChangeListener<T> itemsListener = c -> updateMap();
         
         
         
@@ -255,10 +261,16 @@ public class CheckListView<T> extends ListView<T> {
         CheckListViewBitSetCheckModel(final ObservableList<T> items, final Map<T, BooleanProperty> itemBooleanMap) {
             super(itemBooleanMap);
             
-            this.items = items;
-            this.items.addListener((ListChangeListener<T>) c -> updateMap());
+            this.items = items == null ? FXCollections.emptyObservableList() : items;
+            this.items.addListener(itemsListener);
             
             updateMap();
+        }
+        
+        @Override
+        void dispose() {
+            items.removeListener(itemsListener);
+            super.dispose();
         }
         
         
